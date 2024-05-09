@@ -274,7 +274,7 @@ class Xtts(BaseTTS):
             for i in range(0, audio.shape[1], 22050 * chunk_length):
                 audio_chunk = audio[:, i : i + 22050 * chunk_length]
 
-                # if the chunk is too short ignore it 
+                # if the chunk is too short ignore it
                 if audio_chunk.size(-1) < 22050 * 0.33:
                     continue
 
@@ -410,12 +410,14 @@ class Xtts(BaseTTS):
         if speaker_id is not None:
             gpt_cond_latent, speaker_embedding = self.speaker_manager.speakers[speaker_id].values()
             return self.inference(text, language, gpt_cond_latent, speaker_embedding, **settings)
-        settings.update({
-            "gpt_cond_len": config.gpt_cond_len,
-            "gpt_cond_chunk_len": config.gpt_cond_chunk_len,
-            "max_ref_len": config.max_ref_len,
-            "sound_norm_refs": config.sound_norm_refs,
-        })
+        settings.update(
+            {
+                "gpt_cond_len": config.gpt_cond_len,
+                "gpt_cond_chunk_len": config.gpt_cond_chunk_len,
+                "max_ref_len": config.max_ref_len,
+                "sound_norm_refs": config.sound_norm_refs,
+            }
+        )
         return self.full_inference(text, speaker_wav, language, **settings)
 
     @torch.inference_mode()
@@ -498,6 +500,67 @@ class Xtts(BaseTTS):
             do_sample=do_sample,
             **hf_generate_kwargs,
         )
+
+    @torch.inference_mode()
+    def custom_inference(
+        self,
+        text_tokens,
+        gpt_cond_latent,
+        speaker_embedding,
+        # GPT inference
+        temperature=0.75,
+        length_penalty=1.0,
+        repetition_penalty=10.0,
+        top_k=50,
+        top_p=0.85,
+        do_sample=True,
+        num_beams=1,
+        speed=1.0,
+        **hf_generate_kwargs,
+    ):
+        wavs = []
+        length_scale = 1.0 / max(speed, 0.05)
+        text_tokens = torch.IntTensor(text_tokens).unsqueeze(0).to(self.device)
+        gpt_codes = self.gpt.generate(
+            cond_latents=gpt_cond_latent,
+            text_inputs=text_tokens,
+            input_tokens=None,
+            do_sample=do_sample,
+            top_p=top_p,
+            top_k=top_k,
+            temperature=temperature,
+            num_return_sequences=self.gpt_batch_size,
+            num_beams=num_beams,
+            length_penalty=length_penalty,
+            repetition_penalty=repetition_penalty,
+            output_attentions=False,
+            **hf_generate_kwargs,
+        )
+        expected_output_len = torch.tensor(
+            [gpt_codes.shape[-1] * self.gpt.code_stride_len], device=text_tokens.device
+        )
+
+        text_len = torch.tensor([text_tokens.shape[-1]], device=self.device)
+        gpt_latents = self.gpt(
+            text_tokens,
+            text_len,
+            gpt_codes,
+            expected_output_len,
+            cond_latents=gpt_cond_latent,
+            return_attentions=False,
+            return_latent=True,
+        )
+
+        if length_scale != 1.0:
+            gpt_latents = F.interpolate(
+                gpt_latents.transpose(1, 2), scale_factor=length_scale, mode="linear"
+            ).transpose(1, 2)
+
+        wavs.append(self.hifigan_decoder(gpt_latents, g=speaker_embedding).cpu().squeeze())
+
+        return {
+            "wav": wavs,
+        }
 
     @torch.inference_mode()
     def inference(
