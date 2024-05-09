@@ -13,7 +13,7 @@ from TTS.tts.layers.xtts.gpt_inference import GPT2InferenceModel
 from TTS.tts.layers.xtts.latent_encoder import ConditioningEncoder
 from TTS.tts.layers.xtts.perceiver_encoder import PerceiverResampler
 
-
+from transformers import GenerationConfig
 def null_position_embeddings(range, dim):
     return torch.zeros((range.shape[0], range.shape[1], dim), device=range.device)
 
@@ -65,6 +65,7 @@ def build_hf_gpt_transformer(
         use_cache=not checkpointing,
     )
     gpt = GPT2Model(gpt_config)
+    gpt = gpt.to_bettertransformer()
     # Override the built in positional embeddings
     del gpt.wpe
     gpt.wpe = functools.partial(null_position_embeddings, dim=model_dim)
@@ -587,13 +588,16 @@ class GPT(nn.Module):
         **hf_generate_kwargs,
     ):
         gpt_inputs = self.compute_embeddings(cond_latents, text_inputs)
-        gen = self.gpt_inference.generate(
-            gpt_inputs,
+        generation_config = GenerationConfig(
             bos_token_id=self.start_audio_token,
             pad_token_id=self.stop_audio_token,
             eos_token_id=self.stop_audio_token,
             max_length=self.max_gen_mel_tokens + gpt_inputs.shape[-1],
             **hf_generate_kwargs,
+        )   
+        gen = self.gpt_inference.generate(
+            gpt_inputs,
+            generation_config
         )
         if "return_dict_in_generate" in hf_generate_kwargs:
             return gen.sequences[:, gpt_inputs.shape[1] :], gen
